@@ -1,143 +1,877 @@
-/* ===== Config ===== */
-const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycby069h1-N5Gxo64l8LXrPyH0VbOTcuDK3ij8QSzyY9Ex-ZsnkO_ZCAqAW2pTVncY2np/exec';   // Apps Script web app (entry-api.gs)
-const TABS = ['3.2(A)', '3.2(B)', '3.2(C)', '3.2(D)', '4.1(A)', '4.1(B)', '4.1(C)', '4.1(D)'];
-const STD1 = 7000, STD2 = 3000;   // standard installment amounts (warns if you change them)
 
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const taka = n => '৳' + Math.round(n).toLocaleString('en-US');
+/* =========================================================
+   CONFIGURATION
+========================================================= */
 
-/* ===== Helpers ===== */
-const nowLocal = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
-const toStamp = v => v.replace('T', ' ') + ':00';                 // "2026-11-04T14:35" -> "2026-11-04 14:35:00"
-const fromStamp = s => (s || '').slice(0, 16).replace(' ', ' ');
-const store = {
-  get: k => { try { return sessionStorage.getItem(k) || ''; } catch (e) { return ''; } },
-  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) { } }
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyU9mk3eb-Wz557BoRG4Vj7FOj5WP6ccCLvZQmcRBOz79wx9bkES_9czrsisfE41rQk/exec';
+
+const TABS = [
+  '3.2(A)', '3.2(B)', '3.2(C)', '3.2(D)',
+  '4.1(A)', '4.1(B)', '4.1(C)', '4.1(D)'
+];
+
+const STD1 = 7000;
+const STD2 = 3000;
+
+const GUEST_STD1 = 7000;
+const GUEST_STD2 = 3000;
+
+const RELATIONS = ['Mother', 'Father', 'Brother','Wife','Sister'];
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+const $ = selector => document.querySelector(selector);
+
+const esc = value =>
+  String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c]));
+
+const taka = amount =>
+  '৳' + Math.round(amount).toLocaleString('en-US');
+
+const nowLocal = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
 };
 
+const toStamp = value => value.replace('T', ' ') + ':00';
+
+const store = {
+  get(key) {
+    try {
+      return sessionStorage.getItem(key) || '';
+    } catch {
+      return '';
+    }
+  },
+
+  set(key, value) {
+    try {
+      sessionStorage.setItem(key, value);
+    } catch {}
+  }
+};
+
+/* =========================================================
+   API
+========================================================= */
+
 async function api(body) {
-  const res = await fetch(WEB_APP_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // simple request: no CORS preflight
-    body: JSON.stringify(body)
-  });
-  return res.json();
+  if (!WEB_APP_URL) {
+    throw new Error('Google Apps Script URL is missing.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(WEB_APP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server returned HTTP ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    if (!result || typeof result !== 'object') {
+      throw new Error('Invalid server response.');
+    }
+
+    return result;
+
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Request timed out. Please try again.');
+    }
+
+    throw error;
+
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-/* ===== Init ===== */
-$('#tab').innerHTML = TABS.map(t => `<option value="${t}">${t.replace('(', ' · ').replace(')', '')}</option>`).join('');
-$('#tab').value = store.get('tab') || TABS[0];
-$('#pin').value = store.get('pin');
-$('#t1').value = nowLocal();
-$('#t2').value = nowLocal();
-if (!WEB_APP_URL) $('#setup').classList.add('show');
+/* =========================================================
+   STATE
+========================================================= */
 
-/* ===== Installment blocks ===== */
-let locked = { 1: false, 2: false };      // true when the server says it's already recorded
+let mode = 'student';
+
+let locked = {
+  1: false,
+  2: false
+};
+
+let studentInfo = null;
+
+let lookupTimer = null;
+let lookupSeq = 0;
+let submitting = false;
+
+const logItems = [];
+
+const isGuest = () => mode === 'guest';
+
+const stdOf = n =>
+  isGuest()
+    ? (n === 1 ? GUEST_STD1 : GUEST_STD2)
+    : (n === 1 ? STD1 : STD2);
+
+/* =========================================================
+   STATUS
+========================================================= */
+
+function showStatus(html) {
+  const el = $('#idstat');
+  if (el) el.innerHTML = html;
+}
+
+function showRes(kind, html) {
+  const el = $('#res');
+
+  if (!el) return;
+
+  el.className = 'res show ' + kind;
+  el.innerHTML = html;
+}
+
+const muted = text =>
+  `<span style="color:rgba(255,255,255,.55)">${text}</span>`;
+
+/* =========================================================
+   INSTALLMENT BLOCKS
+========================================================= */
 
 function syncBlock(n) {
-  const on = $('#c' + n).checked && !locked[n];
-  $('#b' + n).classList.toggle('off', !on);
-  $('#b' + n).classList.toggle('locked', locked[n]);
-  const std = n === 1 ? STD1 : STD2, v = Number($('#a' + n).value);
-  $('#w' + n).textContent = locked[n] ? 'Already recorded for this student — can’t be entered again.'
-    : (on && v && v !== std ? `Standard amount is ${taka(std)}.` : '');
+  const checkbox = $('#c' + n);
+  const block = $('#b' + n);
+  const amount = $('#a' + n);
+  const warning = $('#w' + n);
+
+  if (!checkbox || !block || !amount) return;
+
+  const on = checkbox.checked && !locked[n];
+
+  block.classList.toggle('off', !on);
+  block.classList.toggle('locked', locked[n]);
+
+  if (warning) {
+    const standard = stdOf(n);
+    const value = Number(amount.value);
+
+    warning.textContent = locked[n]
+      ? 'Already recorded — cannot be entered again.'
+      : (on && value && value !== standard
+          ? `Standard amount is ${taka(standard)}.`
+          : '');
+  }
+
+  // Keep inactive fields out of keyboard navigation.
+  amount.disabled = !on;
+
+  const time = $('#t' + n);
+  if (time) time.disabled = !on;
 }
-[1, 2].forEach(n => {
-  $('#c' + n).addEventListener('change', () => { if ($('#c' + n).checked) $('#t' + n).value = nowLocal(); syncBlock(n); });
-  $('#a' + n).addEventListener('input', () => syncBlock(n));
-});
 
-/* ===== Live duplicate check when the ID is typed ===== */
-let lookupTimer = 0, lookupSeq = 0;
+function setLock(n, value) {
+  locked[n] = Boolean(value);
 
-function setLock(n, isLocked) {
-  locked[n] = isLocked;
-  if (isLocked) $('#c' + n).checked = false;
-  $('#c' + n).disabled = isLocked;
+  const checkbox = $('#c' + n);
+
+  if (!checkbox) return;
+
+  if (locked[n]) checkbox.checked = false;
+
+  checkbox.disabled = locked[n];
+
   syncBlock(n);
 }
 
-function showStatus(html) { $('#idstat').innerHTML = html; }
+/* =========================================================
+   LOOKUP
+========================================================= */
 
 async function lookup() {
-  const id = $('#sid').value.trim(), pin = $('#pin').value;
-  setLock(1, false); setLock(2, false);
-  if (id.length < 3 || !WEB_APP_URL) { showStatus(''); return; }
-  if (!pin) { showStatus('<span style="color:rgba(255,255,255,.55)">Enter the PIN to check this ID.</span>'); return; }
+  const id = $('#sid')?.value.trim() || '';
+  const pin = $('#pin')?.value || '';
+
+  setLock(1, false);
+  setLock(2, false);
+
+  if (id.length < 3) {
+    showStatus('');
+    return;
+  }
+
+  if (!pin) {
+    showStatus(muted('Enter the PIN to check this ID.'));
+    return;
+  }
+
   const seq = ++lookupSeq;
-  showStatus('<span style="color:rgba(255,255,255,.55)">Checking…</span>');
+
+  showStatus(muted('Checking student ID...'));
+
   try {
-    const r = await api({ action: 'lookup', pin, id });
-    if (seq !== lookupSeq) return;                         // a newer lookup is running
-    if (!r.ok) { showStatus(`<span class="chip o">${esc(r.error)}</span>`); return; }
-    if (!r.found) { showStatus('<span class="chip c">New ID</span> not registered yet.'); return; }
-    const e = r.entry;
-    setLock(1, e.hasFirst); setLock(2, e.hasSecond);
-    if (e.hasSecond && !$('#c2').checked) $('#c2').checked = false;
-    if (!e.hasFirst && !$('#c1').checked) { $('#c1').checked = true; syncBlock(1); }
-    const same = e.tab === $('#tab').value;
-    showStatus(`<span class="chip ${same ? 's' : 'o'}">Already registered</span> ${esc(e.name)} · ${esc(e.tab)} · 1st ${e.hasFirst ? '✓' : '—'} · 2nd ${e.hasSecond ? '✓' : '—'}` +
-      (same ? '' : `<br><span style="color:var(--coral)">This ID belongs to ${esc(e.tab)} — switch the section tab.</span>`));
-    if (same && !$('#name').value.trim()) $('#name').value = e.name;
-  } catch (err) {
-    if (seq === lookupSeq) showStatus('<span class="chip o">Couldn’t reach the entry service.</span>');
+    const r = await api({
+      action: 'lookup',
+      pin,
+      id
+    });
+
+    if (seq !== lookupSeq || isGuest()) return;
+
+    if (!r.ok) {
+      showStatus(`<span class="chip o">${esc(r.error)}</span>`);
+      return;
+    }
+
+    if (!r.found) {
+      showStatus('<span class="chip c">New ID</span> Not registered yet.');
+      return;
+    }
+
+    const entry = r.entry;
+
+    if (!entry) {
+      throw new Error('Student entry is missing.');
+    }
+
+    setLock(1, entry.hasFirst);
+    setLock(2, entry.hasSecond);
+
+    const same = entry.tab === $('#tab')?.value;
+
+    showStatus(
+      `<span class="chip ${same ? 's' : 'o'}">Already registered</span>
+      ${esc(entry.name)} · ${esc(entry.tab)}
+      · 1st ${entry.hasFirst ? '✓' : '—'}
+      · 2nd ${entry.hasSecond ? '✓' : '—'}` +
+      (same
+        ? ''
+        : `<br><span style="color:var(--coral)">
+            This ID belongs to ${esc(entry.tab)}.
+            Switch the section tab.
+          </span>`)
+    );
+
+    if (!$('#name').value.trim()) {
+      $('#name').value = entry.name;
+    }
+
+    if (!entry.hasFirst && same) {
+      $('#c1').checked = true;
+      syncBlock(1);
+    }
+
+  } catch (error) {
+    if (seq === lookupSeq) {
+      showStatus(
+        `<span class="chip o">${esc(error.message || 'Could not reach entry service.')}</span>`
+      );
+    }
   }
 }
-$('#sid').addEventListener('input', () => { clearTimeout(lookupTimer); lookupTimer = setTimeout(lookup, 450); });
-$('#pin').addEventListener('change', () => { store.set('pin', $('#pin').value); lookup(); });
-$('#tab').addEventListener('change', () => { store.set('tab', $('#tab').value); lookup(); });
 
-/* ===== Submit ===== */
-const logItems = [];
-function showRes(kind, html) { const r = $('#res'); r.className = 'res show ' + kind; r.innerHTML = html; }
+/* =========================================================
+   GUEST LOOKUP
+========================================================= */
+
+function setStudentFields(entry) {
+  const name = $('#gsname');
+  const section = $('#gssec');
+
+  if (name) name.value = entry?.name || '';
+  if (section) section.value = entry?.tab || '';
+}
+
+async function guestCheck() {
+  const id = $('#gsid')?.value.trim() || '';
+  const relation = $('#grel')?.value || '';
+  const pin = $('#pin')?.value || '';
+
+  studentInfo = null;
+  setStudentFields(null);
+
+  setLock(1, false);
+  setLock(2, false);
+
+  if (id.length < 3) {
+    showStatus('');
+    return;
+  }
+
+  if (!pin) {
+    showStatus(muted('Enter the PIN to verify this student ID.'));
+    return;
+  }
+
+  const seq = ++lookupSeq;
+
+  showStatus(muted('Verifying student...'));
+
+  try {
+    const s = await api({
+      action: 'lookup',
+      pin,
+      id
+    });
+
+    if (seq !== lookupSeq || !isGuest()) return;
+
+    if (!s.ok) {
+      showStatus(`<span class="chip o">${esc(s.error)}</span>`);
+      return;
+    }
+
+    if (!s.found || !s.entry) {
+      showStatus('<span class="chip o">Student not found.</span> Register the student first.');
+      return;
+    }
+
+    studentInfo = s.entry;
+
+    setStudentFields(studentInfo);
+
+    let html =
+      `<span class="chip s">Student verified</span>
+      ${esc(studentInfo.name)} · ${esc(studentInfo.tab)}`;
+
+    if (relation) {
+      const g = await api({
+        action: 'lookupGuest',
+        pin,
+        id,
+        relation
+      });
+
+      if (seq !== lookupSeq || !isGuest()) return;
+
+      if (!g.ok) {
+        showStatus(`<span class="chip o">${esc(g.error)}</span>`);
+        return;
+      }
+
+      if (g.found && g.entry) {
+        const entry = g.entry;
+
+        setLock(1, entry.hasFirst);
+        setLock(2, entry.hasSecond);
+
+        if (!entry.hasFirst) {
+          $('#c1').checked = true;
+          syncBlock(1);
+        }
+
+        html +=
+          `<br><span class="chip o">Already registered</span>
+          ${esc(entry.guestName)} (${esc(relation)})
+          · 1st ${entry.hasFirst ? '✓' : '—'}
+          · 2nd ${entry.hasSecond ? '✓' : '—'}`;
+
+        if (!$('#gname').value.trim()) {
+          $('#gname').value = entry.guestName;
+        }
+
+      } else {
+        html += `<br><span class="chip c">New guest</span> ${esc(relation)} not registered yet.`;
+      }
+    }
+
+    showStatus(html);
+
+  } catch (error) {
+    if (seq === lookupSeq) {
+      showStatus(
+        `<span class="chip o">${esc(error.message)}</span>`
+      );
+    }
+  }
+}
+
+/* =========================================================
+   REFRESH / DEBOUNCE
+========================================================= */
+
+function refresh() {
+  return isGuest() ? guestCheck() : lookup();
+}
+
+function debounced() {
+  clearTimeout(lookupTimer);
+
+  lookupTimer = setTimeout(refresh, 450);
+}
+
+/* =========================================================
+   MODE SWITCH
+========================================================= */
+
+function setMode(newMode) {
+  mode = newMode;
+
+  lookupSeq++;
+
+  clearTimeout(lookupTimer);
+
+  $('#studentFields').hidden = isGuest();
+  $('#guestFields').hidden = !isGuest();
+
+  $('#formTitle').textContent =
+    isGuest() ? 'Guest entry' : 'Student entry';
+
+  $('#formSub').textContent = isGuest()
+    ? 'Saved into the guest tab. One guest per relation per student.'
+    : 'Saved directly into the selected section tab.';
+
+  const result = $('#res');
+
+  if (result) result.className = 'res';
+
+  studentInfo = null;
+  setStudentFields(null);
+
+  showStatus('');
+
+  setLock(1, false);
+  setLock(2, false);
+
+  $('#a1').value = stdOf(1);
+  $('#a2').value = stdOf(2);
+
+  $('#c1').checked = true;
+  $('#c2').checked = false;
+
+  $('#t1').value = nowLocal();
+  $('#t2').value = nowLocal();
+
+  syncBlock(1);
+  syncBlock(2);
+
+  refresh();
+}
+
+/* =========================================================
+   VALIDATION
+========================================================= */
+
+function readParts() {
+  const use1 = $('#c1').checked && !locked[1];
+  const use2 = $('#c2').checked && !locked[2];
+
+  if (!use1 && !use2) {
+    throw new Error('Tick at least one installment to record.');
+  }
+
+  const part = n => {
+    const amount = Number($('#a' + n).value);
+    const at = $('#t' + n).value;
+
+    if (!(amount > 0)) {
+      throw new Error(`${n === 1 ? '1st' : '2nd'} installment: enter a valid amount.`);
+    }
+
+    if (!at) {
+      throw new Error(`${n === 1 ? '1st' : '2nd'} installment: select the payment date and time.`);
+    }
+
+    return {
+      amount,
+      at: toStamp(at)
+    };
+  };
+
+  return {
+    first: use1 ? part(1) : null,
+    second: use2 ? part(2) : null
+  };
+}
+
+/* =========================================================
+   SESSION LOG
+========================================================= */
 
 function renderLog() {
-  $('#log').innerHTML = logItems.length ? logItems.map(i =>
-    `<li><b>${esc(i.name)}</b><small>${esc(i.id)} · ${esc(i.tab)} · Slr ${esc(i.slr)} · ${i.added.join(' + ')} installment · ${i.time}</small></li>`).join('')
+  const el = $('#log');
+
+  if (!el) return;
+
+  el.innerHTML = logItems.length
+    ? logItems.map(item =>
+        `<li>
+          <b>${esc(item.name)}</b>
+          <small>
+            ${esc(item.id)} · ${esc(item.tab)}
+            · Slr ${esc(item.slr)}
+            · ${item.added.map(esc).join(' + ')} installment
+            · ${esc(item.time)}
+          </small>
+        </li>`
+      ).join('')
     : '<li class="empty">Nothing yet.</li>';
 }
 
-async function submit(force) {
-  const name = $('#name').value.trim(), id = $('#sid').value.trim(), pin = $('#pin').value, tab = $('#tab').value;
-  if (!WEB_APP_URL) return showRes('bad', 'Not connected yet — paste the web app URL into <code>WEB_APP_URL</code> in entry.js.');
-  if (!name || !id) return showRes('bad', 'Name and ID are both required.');
-  if (!pin) return showRes('bad', 'Enter the organizer PIN.');
+/* =========================================================
+   SUBMIT BUTTON
+========================================================= */
 
-  const use1 = $('#c1').checked && !locked[1], use2 = $('#c2').checked && !locked[2];
-  if (!use1 && !use2) return showRes('bad', 'Tick at least one installment to record.');
-  const part = n => {
-    const amount = Number($('#a' + n).value), at = $('#t' + n).value;
-    if (!(amount > 0)) throw new Error(`${n === 1 ? '1st' : '2nd'} installment: enter an amount.`);
-    if (!at) throw new Error(`${n === 1 ? '1st' : '2nd'} installment: pick the paid date and time.`);
-    return { amount, at: toStamp(at) };
-  };
-  let first = null, second = null;
-  try { if (use1) first = part(1); if (use2) second = part(2); } catch (e) { return showRes('bad', esc(e.message)); }
+function setButton(loading) {
+  const btn = $('#go');
 
-  const btn = $('#go'); btn.disabled = true; btn.textContent = 'Saving…';
+  if (!btn) return;
+
+  btn.disabled = loading;
+  btn.textContent = loading ? 'Saving...' : 'Save entry';
+}
+
+/* =========================================================
+   STUDENT SUBMISSION
+========================================================= */
+
+async function submit(force = false) {
+  if (isGuest()) {
+    return submitGuest();
+  }
+
+  if (submitting) return;
+
+  const name = $('#name').value.trim();
+  const id = $('#sid').value.trim();
+  const pin = $('#pin').value;
+  const tab = $('#tab').value;
+
+  if (!name || !id) {
+    return showRes('bad', 'Name and Student ID are required.');
+  }
+
+  if (!pin) {
+    return showRes('bad', 'Enter the organizer PIN.');
+  }
+
+  let first, second;
+
   try {
-    const r = await api({ action: 'save', pin, tab, name, id, first, second, force: !!force });
+    ({ first, second } = readParts());
+  } catch (error) {
+    return showRes('bad', esc(error.message));
+  }
+
+  submitting = true;
+  setButton(true);
+
+  try {
+    const r = await api({
+      action: 'save',
+      pin,
+      tab,
+      name,
+      id,
+      first,
+      second,
+      force: Boolean(force)
+    });
+
     if (r.ok) {
-      showRes('ok', `✔ Saved <b>${esc(r.name)}</b> in <b>${esc(r.tab)}</b> (Slr ${esc(r.slr)}) — ${r.added.join(' + ')} installment${r.added.length > 1 ? 's' : ''}.`);
-      logItems.unshift({ name: r.name, id: r.id, tab: r.tab, slr: r.slr, added: r.added, time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) });
+      showRes(
+        'ok',
+        `✔ Saved <b>${esc(r.name)}</b> in <b>${esc(r.tab)}</b>
+        (Slr ${esc(r.slr)}) — ${r.added.map(esc).join(' + ')} installment(s).`
+      );
+
+      logItems.unshift({
+        name: r.name,
+        id: r.id,
+        tab: r.tab,
+        slr: r.slr,
+        added: r.added,
+        time: new Date().toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit'
+        })
+      });
+
       renderLog();
-      $('#name').value = ''; $('#sid').value = ''; showStatus('');
-      setLock(1, false); setLock(2, false);
-      $('#c1').checked = true; $('#c2').checked = false; syncBlock(1); syncBlock(2);
-      $('#t1').value = nowLocal(); $('#t2').value = nowLocal();
+
+      $('#name').value = '';
+      $('#sid').value = '';
+
+      showStatus('');
+
+      setLock(1, false);
+      setLock(2, false);
+
+      $('#c1').checked = true;
+      $('#c2').checked = false;
+
+      $('#t1').value = nowLocal();
+      $('#t2').value = nowLocal();
+
+      syncBlock(1);
+      syncBlock(2);
+
       $('#name').focus();
+
     } else if (r.needConfirm && !force) {
-      if (confirm(r.error + '\n\nSave anyway as a new student?')) { btn.disabled = false; btn.textContent = 'Save entry'; return submit(true); }
+      const accepted = confirm(
+        r.error + '\n\nSave anyway as a new student?'
+      );
+
+      if (accepted) {
+        submitting = false;
+        setButton(false);
+        return submit(true);
+      }
+
       showRes('bad', esc(r.error) + ' — not saved.');
+
     } else {
       showRes('bad', esc(r.error || 'Could not save.'));
     }
-  } catch (err) {
-    showRes('bad', 'Couldn’t reach the entry service. Check the web app URL and your internet, then try again.');
-  } finally { btn.disabled = false; btn.textContent = 'Save entry'; }
+
+  } catch (error) {
+    showRes('bad', esc(error.message || 'Could not reach the entry service.'));
+  } finally {
+    submitting = false;
+    setButton(false);
+  }
 }
 
-$('#f').addEventListener('submit', e => { e.preventDefault(); submit(false); });
-syncBlock(1); syncBlock(2);
+/* =========================================================
+   GUEST SUBMISSION
+========================================================= */
+
+async function submitGuest() {
+  if (submitting) return;
+
+  const guestName = $('#gname').value.trim();
+  const relation = $('#grel').value;
+  const id = $('#gsid').value.trim();
+  const pin = $('#pin').value;
+
+  if (!guestName) {
+    return showRes('bad', 'Enter the guest name.');
+  }
+
+  if (!RELATIONS.includes(relation)) {
+    return showRes('bad', 'Select Mother, Father, Brother, Wife or Sister.');
+  }
+
+  if (!id) {
+    return showRes('bad', 'Enter the student ID.');
+  }
+
+  if (!pin) {
+    return showRes('bad', 'Enter the organizer PIN.');
+  }
+
+  if (!studentInfo || studentInfo.id && studentInfo.id !== id) {
+    return showRes('bad', 'Verify the student ID first.');
+  }
+
+  let first, second;
+
+  try {
+    ({ first, second } = readParts());
+  } catch (error) {
+    return showRes('bad', esc(error.message));
+  }
+
+  submitting = true;
+  setButton(true);
+
+  try {
+    const r = await api({
+      action: 'saveGuest',
+      pin,
+      guestName,
+      relation,
+      id,
+      studentName: studentInfo.name,
+      section: studentInfo.tab,
+      first,
+      second
+    });
+
+    if (r.ok) {
+      showRes(
+        'ok',
+        `✔ Saved guest <b>${esc(r.guestName)}</b>
+        (${esc(r.relation)} of ${esc(r.studentName)})
+        — Slr ${esc(r.slr)}.`
+      );
+
+      logItems.unshift({
+        name: r.guestName + ' (guest)',
+        id: r.id,
+        tab: 'guest',
+        slr: r.slr,
+        added: r.added,
+        time: new Date().toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit'
+        })
+      });
+
+      renderLog();
+
+      $('#gname').value = '';
+      $('#gsid').value = '';
+      $('#grel').value = '';
+
+      studentInfo = null;
+      setStudentFields(null);
+
+      setLock(1, false);
+      setLock(2, false);
+
+      $('#c1').checked = true;
+      $('#c2').checked = false;
+
+      $('#t1').value = nowLocal();
+      $('#t2').value = nowLocal();
+
+      syncBlock(1);
+      syncBlock(2);
+
+      showStatus('');
+
+      $('#gname').focus();
+
+    } else {
+      showRes('bad', esc(r.error || 'Could not save.'));
+    }
+
+  } catch (error) {
+    showRes('bad', esc(error.message || 'Could not reach entry service.'));
+  } finally {
+    submitting = false;
+    setButton(false);
+  }
+}
+
+/* =========================================================
+   INITIALIZATION
+========================================================= */
+
+function init() {
+  const required = [
+    '#tab', '#grel', '#pin',
+    '#t1', '#t2', '#c1', '#c2',
+    '#a1', '#a2', '#b1', '#b2',
+    '#sid', '#gsid', '#name',
+    '#gname', '#f', '#go',
+    '#studentFields', '#guestFields',
+    '#formTitle', '#formSub',
+    '#idstat', '#res'
+  ];
+
+  const missing = required.filter(selector => !$(selector));
+
+  if (missing.length) {
+    console.error('Missing HTML elements:', missing);
+    return;
+  }
+
+  $('#tab').innerHTML = TABS.map(tab =>
+    `<option value="${esc(tab)}">${esc(tab.replace('(', ' · ').replace(')', ''))}</option>`
+  ).join('');
+
+  $('#tab').value = TABS.includes(store.get('tab'))
+    ? store.get('tab')
+    : TABS[0];
+
+  $('#grel').innerHTML =
+    '<option value="">Select relation</option>' +
+    RELATIONS.map(r =>
+      `<option value="${esc(r)}">${esc(r)}</option>`
+    ).join('');
+
+  $('#pin').value = store.get('pin');
+
+  $('#t1').value = nowLocal();
+  $('#t2').value = nowLocal();
+
+  $('#a1').value = STD1;
+  $('#a2').value = STD2;
+
+  $('#c1').checked = true;
+  $('#c2').checked = false;
+
+  // Installment listeners
+  [1, 2].forEach(n => {
+    $('#c' + n).addEventListener('change', () => {
+      if ($('#c' + n).checked) {
+        $('#t' + n).value = nowLocal();
+      }
+      syncBlock(n);
+    });
+
+    $('#a' + n).addEventListener('input', () => syncBlock(n));
+  });
+
+  // Lookup listeners
+  $('#sid').addEventListener('input', () => {
+    if (!isGuest()) debounced();
+  });
+
+  $('#gsid').addEventListener('input', () => {
+    if (isGuest()) debounced();
+  });
+
+  $('#grel').addEventListener('change', () => {
+    if (isGuest()) refresh();
+  });
+
+  $('#pin').addEventListener('input', () => {
+    store.set('pin', $('#pin').value);
+  });
+
+  $('#pin').addEventListener('change', refresh);
+
+  $('#tab').addEventListener('change', () => {
+    store.set('tab', $('#tab').value);
+    if (!isGuest()) lookup();
+  });
+
+  // Mode switching
+  document.querySelectorAll('input[name="mode"]').forEach(r => {
+    r.addEventListener('change', () => {
+      if (r.checked) setMode(r.value);
+    });
+  });
+
+  // Form submission
+  $('#f').addEventListener('submit', event => {
+    event.preventDefault();
+    submit(false);
+  });
+
+  // Initial state
+  syncBlock(1);
+  syncBlock(2);
+
+  setMode('student');
+
+  console.log('Entry system initialized successfully.');
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

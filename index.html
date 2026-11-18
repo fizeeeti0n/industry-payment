@@ -48,13 +48,18 @@ select.input option{color:var(--navy)}
 .log small{color:rgba(255,255,255,.6)}
 .empty{padding:16px;text-align:center;color:rgba(255,255,255,.5);font-size:13px}
 .hint{font-size:12px;color:rgba(255,255,255,.55);margin-top:6px}
+[hidden]{display:none!important}
+.seg{display:flex;gap:8px;margin:0 0 6px}
+.seg label{flex:1;margin:0;padding:10px 12px;text-align:center;border-radius:12px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.05);cursor:pointer;color:#fff;text-transform:none;letter-spacing:0;font-size:14px;font-weight:700;transition:.2s}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg label:has(input:checked){background:var(--coral);border-color:var(--coral);color:#fff}
+.seg label:has(input:focus-visible){outline:2px solid var(--cyan);outline-offset:2px}
 </style>
 </head>
 <body>
 <header><nav class="glass" aria-label="Main">
-  <a href="index.html" class="logo">⚓ Industrial Tour</a>
-  <a href="https://industrial-cse.vercel.app/dashboard.html" target="_blank" rel="noopener noreferrer">View Dashboard</a>
-
+  <a href="https://industrial-cse.vercel.app/index.html" class="logo">⚓ Industrial Tour</a>
+   <a href="https://industrial-cse.vercel.app/dashboard.html" target="_blank" rel="noopener noreferrer">View Dashboard</a>
 </nav></header>
 
 <main class="wrap">
@@ -69,20 +74,56 @@ select.input option{color:var(--navy)}
 
   <div class="formwrap">
     <form class="glass card2" id="f" autocomplete="off" novalidate>
-      <h2>Student entry</h2>
-      <p class="sub">Saved straight into the section tab you pick. Duplicates are blocked.</p>
+      <div class="seg" role="radiogroup" aria-label="Entry type">
+        <label><input type="radio" name="mode" value="student" checked> 🎓 Student</label>
+        <label><input type="radio" name="mode" value="guest"> 👪 Guest</label>
+      </div>
 
-      <label for="tab">Section tab</label>
-      <select class="input" id="tab"></select>
+      <h2 id="formTitle">Student entry</h2>
+      <p class="sub" id="formSub">Saved straight into the section tab you pick. Duplicates are blocked.</p>
 
-      <div class="row2">
-        <div>
-          <label for="name">Name</label>
-          <input class="input" id="name" type="text" placeholder="Full name" required>
+      <!-- STUDENT FIELDS -->
+      <div id="studentFields">
+        <label for="tab">Section tab</label>
+        <select class="input" id="tab"></select>
+
+        <div class="row2">
+          <div>
+            <label for="name">Name</label>
+            <input class="input" id="name" type="text" placeholder="Full name" required>
+          </div>
+          <div>
+            <label for="sid">ID</label>
+            <input class="input" id="sid" type="text" inputmode="numeric" placeholder="e.g. 23101110" required>
+          </div>
         </div>
-        <div>
-          <label for="sid">ID</label>
-          <input class="input" id="sid" type="text" inputmode="numeric" placeholder="e.g. 23101110" required>
+      </div>
+
+      <!-- GUEST FIELDS -->
+      <div id="guestFields" hidden>
+        <label for="gname">Guest name</label>
+        <input class="input" id="gname" type="text" placeholder="Guest's full name">
+
+        <div class="row2">
+          <div>
+            <label for="grel">Relation with student</label>
+            <select class="input" id="grel"></select>
+          </div>
+          <div>
+            <label for="gsid">Student ID</label>
+            <input class="input" id="gsid" type="text" inputmode="numeric" placeholder="e.g. 23101110">
+          </div>
+        </div>
+
+        <div class="row2">
+          <div>
+            <label for="gsname">Student name</label>
+            <input class="input" id="gsname" type="text" placeholder="Filled in from the student ID" readonly tabindex="-1">
+          </div>
+          <div>
+            <label for="gssec">Section</label>
+            <input class="input" id="gssec" type="text" placeholder="Filled in from the student ID" readonly tabindex="-1">
+          </div>
         </div>
       </div>
       <div class="idstat" id="idstat"></div>
@@ -113,14 +154,14 @@ select.input option{color:var(--navy)}
       <div class="res" id="res" role="status" aria-live="polite"></div>
     </form>
 
-    <aside class="glass card2">
+    <!-- <aside class="glass card2">
       <h2>Entered this session</h2>
       <p class="sub">Newest first. Cleared when you close the page.</p>
       <ul class="log" id="log"><li class="empty">Nothing yet.</li></ul>
-    </aside>
+    </aside> -->
   </div>
 </main>
 
-<script src="entry.js"></script>
+<script src="entry.js" defer></script>
 </body>
 </html>
