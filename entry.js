@@ -184,8 +184,30 @@ function syncBlock(n) {
   // Keep inactive fields out of keyboard navigation.
   amount.disabled = !on;
 
+  const custom = $('#cd' + n);
   const time = $('#t' + n);
-  if (time) time.disabled = !on;
+  const note = $('#n' + n);
+
+  if (custom) custom.disabled = !on;
+
+  const useCustom = Boolean(custom && custom.checked && on);
+
+  if (time) {
+    time.hidden = !useCustom;
+    time.disabled = !useCustom;
+    time.max = nowLocal();
+  }
+
+  if (note) note.hidden = useCustom;
+}
+
+function resetCustomDates() {
+  [1, 2].forEach(n => {
+    const custom = $('#cd' + n);
+    if (custom) custom.checked = false;
+    const time = $('#t' + n);
+    if (time) time.value = nowLocal();
+  });
 }
 
 function setLock(n, value) {
@@ -459,6 +481,7 @@ function setMode(newMode) {
 
   $('#t1').value = nowLocal();
   $('#t2').value = nowLocal();
+  resetCustomDates();
 
   syncBlock(1);
   syncBlock(2);
@@ -480,7 +503,12 @@ function readParts() {
 
   const part = n => {
     const amount = Number($('#a' + n).value);
-    const at = $('#t' + n).value;
+    const custom = $('#cd' + n).checked;
+    const at = custom ? $('#t' + n).value : nowLocal();
+
+    if (custom && at > nowLocal()) {
+      throw new Error(`${n === 1 ? '1st' : '2nd'} installment: the custom date can't be in the future.`);
+    }
 
     if (!(amount > 0)) {
       throw new Error(`${n === 1 ? '1st' : '2nd'} installment: enter a valid amount.`);
@@ -620,6 +648,7 @@ async function submit(force = false) {
 
       $('#t1').value = nowLocal();
       $('#t2').value = nowLocal();
+      resetCustomDates();
 
       syncBlock(1);
       syncBlock(2);
@@ -744,6 +773,7 @@ async function submitGuest() {
 
       $('#t1').value = nowLocal();
       $('#t2').value = nowLocal();
+      resetCustomDates();
 
       syncBlock(1);
       syncBlock(2);
@@ -805,6 +835,7 @@ function init() {
 
   $('#t1').value = nowLocal();
   $('#t2').value = nowLocal();
+  resetCustomDates();
 
   $('#a1').value = STD1;
   $('#a2').value = STD2;
@@ -822,6 +853,14 @@ function init() {
     });
 
     $('#a' + n).addEventListener('input', () => syncBlock(n));
+
+    $('#cd' + n).addEventListener('change', () => {
+      if ($('#cd' + n).checked) {
+        $('#t' + n).value = nowLocal();
+      }
+      syncBlock(n);
+      if ($('#cd' + n).checked) $('#t' + n).focus();
+    });
   });
 
   // Lookup listeners
